@@ -3,13 +3,16 @@
 
 const STORAGE_KEY = "forgeboard_data_v1";
 
-const AREAS = [
-  { id: "process", label: "Process Engineering", color: "var(--purple)" },
-  { id: "maintenance", label: "Maintenance", color: "var(--red)" },
-  { id: "production", label: "Production", color: "var(--blue)" },
-  { id: "automation", label: "Automation", color: "var(--cyan)" },
-  { id: "general", label: "General", color: "var(--text-faint)" },
-];
+function defaultAreas() {
+  return [
+    { id: "process", label: "Process Engineering", color: "#b18aff" },
+    { id: "maintenance", label: "Maintenance", color: "#ff5c6a" },
+    { id: "production", label: "Production", color: "#5b8cff" },
+    { id: "automation", label: "Automation", color: "#3dd6ff" },
+    { id: "general", label: "General", color: "#5f6c8c" },
+  ];
+}
+const AREA_COLOR_POOL = ["#b18aff", "#ff5c6a", "#5b8cff", "#3dd6ff", "#ffb020", "#33d69f", "#ff8a3d"];
 
 const PRIORITIES = [
   { id: "low", label: "Low", color: "var(--text-faint)" },
@@ -48,7 +51,10 @@ function fmtDate(iso) {
   const d = new Date(iso + "T00:00:00");
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
-function areaMeta(id) { return AREAS.find(a => a.id === id) || AREAS[AREAS.length - 1]; }
+function areaMeta(id) { return state.areas.find(a => a.id === id) || state.areas[state.areas.length - 1]; }
+function slugify(label) {
+  return label.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") || "area";
+}
 function prioMeta(id) { return PRIORITIES.find(p => p.id === id) || PRIORITIES[0]; }
 
 function seedData() {
@@ -73,6 +79,7 @@ function seedData() {
   ];
   return {
     team,
+    areas: defaultAreas(),
     tasks: tasks.map(t => ({
       id: uid(), title: t.title, notes: "", area: t.area, assignee: t.assignee,
       priority: t.priority, status: t.status, due: t.due, tags: t.tags || [],
@@ -90,7 +97,12 @@ let state = load();
 function load() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) return JSON.parse(raw);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (!parsed.areas) parsed.areas = defaultAreas();
+      if (!parsed.ui) parsed.ui = { theme: "dark", areaFilter: null, assigneeFilter: null, tab: "board" };
+      return parsed;
+    }
   } catch (e) { /* corrupt storage falls through to reseed */ }
   return seedData();
 }
@@ -116,7 +128,7 @@ function parseQuickAdd(raw) {
 
   text = text.replace(/#(\S+)/g, (_, w) => {
     const lw = w.toLowerCase();
-    const areaHit = AREAS.find(a => a.id.startsWith(lw) || a.label.toLowerCase().startsWith(lw));
+    const areaHit = state.areas.find(a => a.id.startsWith(lw) || a.label.toLowerCase().startsWith(lw));
     if (areaHit) area = areaHit.id; else tags.push(lw);
     return "";
   });
@@ -207,6 +219,25 @@ function removeTeamMember(id) {
   if (m) logActivity(`Removed team member: ${m.name}`);
   save(); renderAll();
 }
+function addArea(label) {
+  const base = slugify(label);
+  let id = base, n = 1;
+  while (state.areas.some(a => a.id === id)) { n++; id = `${base}-${n}`; }
+  const color = AREA_COLOR_POOL[state.areas.length % AREA_COLOR_POOL.length];
+  state.areas.push({ id, label: label.trim(), color });
+  logActivity(`Added focus area: ${label.trim()}`);
+  save(); renderAll();
+}
+function removeArea(id) {
+  if (state.areas.length <= 1) { toast("Keep at least one focus area"); return; }
+  const a = state.areas.find(a => a.id === id);
+  const fallback = state.areas.find(x => x.id !== id).id;
+  state.tasks.forEach(t => { if (t.area === id) t.area = fallback; });
+  state.areas = state.areas.filter(a => a.id !== id);
+  if (state.ui.areaFilter === id) state.ui.areaFilter = null;
+  if (a) logActivity(`Removed focus area: ${a.label}`);
+  save(); renderAll();
+}
 
 /* ---------------- Derived / stats ---------------- */
 function isOverdue(t) { return t.due && t.due < todayISO() && t.status !== "done"; }
@@ -255,12 +286,17 @@ function renderSidebarFilters() {
   const allRow = el("div", { class: "filter-row" + (!state.ui.areaFilter ? " active" : ""), onclick: () => { state.ui.areaFilter = null; save(); renderAll(); } },
     [el("span", { class: "dot", style: "background:var(--accent)" }), "All areas"]);
   areaWrap.appendChild(allRow);
-  AREAS.forEach(a => {
+  state.areas.forEach(a => {
     const count = state.tasks.filter(t => t.area === a.id && t.status !== "done").length;
     const row = el("div", { class: "filter-row" + (state.ui.areaFilter === a.id ? " active" : ""), onclick: () => { state.ui.areaFilter = state.ui.areaFilter === a.id ? null : a.id; save(); renderAll(); } },
-      [el("span", { class: "dot", style: `background:${a.color}` }), a.label, el("span", { class: "count" }, String(count))]);
+      [
+        el("span", { class: "dot", style: `background:${a.color}` }), a.label, el("span", { class: "count" }, String(count)),
+        el("span", { class: "team-remove", title: "Remove area", style: "margin-left:6px", onclick: (e) => { e.stopPropagation(); if (confirm(`Remove "${a.label}"? Its tasks will move to another area.`)) removeArea(a.id); } }, "✕"),
+      ]);
     areaWrap.appendChild(row);
   });
+  areaWrap.appendChild(el("div", { class: "filter-row", style: "color:var(--accent)", onclick: () => { const name = prompt("New focus area name:"); if (name && name.trim()) addArea(name.trim()); } },
+    [el("span", { class: "dot", style: "background:none;border:1.5px dashed var(--accent)" }), "+ Add area"]));
 
   const asWrap = document.getElementById("assigneeFilters");
   asWrap.innerHTML = "";
@@ -461,7 +497,7 @@ let editingId = null;
 function openModal(task) {
   editingId = task ? task.id : null;
   document.getElementById("modalTitle").textContent = task ? "Edit task" : "New task";
-  fillSelect(document.getElementById("f-area"), AREAS, "id", "label");
+  fillSelect(document.getElementById("f-area"), state.areas, "id", "label");
   fillSelect(document.getElementById("f-assignee"), state.team, "id", "name", "Unassigned");
   document.getElementById("f-title").value = task?.title || "";
   document.getElementById("f-notes").value = task?.notes || "";
